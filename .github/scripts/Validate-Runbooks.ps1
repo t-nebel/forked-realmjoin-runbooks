@@ -49,9 +49,25 @@ function Get-ChangedFiles {
         [string]$Head
     )
 
-    # Use two-dot diff because in pull_request workflows HeadRef is typically a merge commit
-    # with BaseRef as one of its parents. This reliably yields the PR-introduced changes.
-    $diffArgs = @('diff', '--name-only', '--diff-filter=AM', "$Base..$Head")
+    # In pull_request workflows, HeadRef is typically a merge commit. To reliably get the PR
+    # changes (and not an arbitrary base SHA from the payload), prefer diffing between the
+    # merge commit parents: base-parent..pr-head-parent.
+    $parentsLine = & git rev-list --parents -n 1 $Head 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to inspect HeadRef '$Head' via git rev-list. Error: $($parentsLine | Out-String)"
+    }
+
+    $parts = ($parentsLine -split '\s+' | Where-Object { $_ -and $_.Trim() -ne '' })
+    $isMergeCommit = ($parts.Count -ge 3)
+
+    if ($isMergeCommit) {
+        $baseParent = $parts[1]
+        $prParent = $parts[2]
+        $diffArgs = @('diff', '--name-only', '--diff-filter=AM', "$baseParent..$prParent")
+    }
+    else {
+        $diffArgs = @('diff', '--name-only', '--diff-filter=AM', "$Base..$Head")
+    }
 
     try {
         $output = & git @diffArgs 2>&1
@@ -262,7 +278,12 @@ function Assert-RunbookPassesScriptAnalyzer {
         throw "PSScriptAnalyzer module is not available. Install it (e.g. Install-Module PSScriptAnalyzer) before running this check."
     }
 
-    $results = Invoke-ScriptAnalyzer -Path $RunbookPath -Severity @('Error')
+    try {
+        $results = Invoke-ScriptAnalyzer -Path $RunbookPath -Severity @('Error')
+    }
+    catch {
+        throw "PSScriptAnalyzer failed to analyze '$RunbookPath'. Error: $($_.Exception.Message)"
+    }
     if ($results -and $results.Count -gt 0) {
         $messages = $results | ForEach-Object {
             $line = if ($_.Line) { "Line $($_.Line)" } else { "" }
@@ -298,8 +319,8 @@ foreach ($relPath in $changedPs1) {
 
     try {
         Assert-RunbookHasPermissionsFile -RunbookPath $path
-        Assert-RunbookHelpIsComplete -RunbookPath $path
         Assert-RunbookPassesScriptAnalyzer -RunbookPath $path
+        Assert-RunbookHelpIsComplete -RunbookPath $path
     }
     catch {
         $failures++
