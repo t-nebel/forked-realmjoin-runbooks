@@ -1,4 +1,4 @@
-name: ✅ Validate runbooks
+name: Runbook validation
 
 on:
   pull_request:
@@ -10,14 +10,14 @@ on:
 
 jobs:
   validate-runbooks:
-    name: 🧪 Runbook checks
+    name: Validate runbooks
     runs-on: ubuntu-latest
 
     steps:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 2
 
       - name: 📦 Install PSScriptAnalyzer
         shell: pwsh
@@ -28,5 +28,4 @@ jobs:
       - name: 🔍 Validate changed runbooks
         shell: pwsh
         run: |
-          git fetch origin ${{ github.base_ref }} --depth=1
-          ./.github/scripts/Validate-Runbooks.ps1 -BaseRef "origin/${{ github.base_ref }}" -HeadRef "${{ github.sha }}"
+          ./.github/scripts/Validate-Runbooks.ps1 -BaseRef "${{ github.event.pull_request.base.sha }}" -HeadRef "${{ github.sha }}"

@@ -33,7 +33,7 @@ function Write-GitHubError {
 
     if ($FilePath) {
         # GitHub Actions annotation
-        Write-Output "::error file=$FilePath::$Message"
+        Write-Output "::error file=$FilePath,title=Runbook validation failed::$Message"
     }
     else {
         Write-Error $Message
@@ -49,7 +49,9 @@ function Get-ChangedFiles {
         [string]$Head
     )
 
-    $diffArgs = @('diff', '--name-only', '--diff-filter=AM', "$Base...$Head")
+    # Use two-dot diff because in pull_request workflows HeadRef is typically a merge commit
+    # with BaseRef as one of its parents. This reliably yields the PR-introduced changes.
+    $diffArgs = @('diff', '--name-only', '--diff-filter=AM', "$Base..$Head")
 
     try {
         $output = & git @diffArgs 2>&1
@@ -62,6 +64,23 @@ function Get-ChangedFiles {
     }
 
     return ($output | Where-Object { $_ -and $_.Trim() -ne '' } | ForEach-Object { $_.Trim() })
+}
+
+function Shorten-Text {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Text,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxLength = 240
+    )
+
+    $t = ($Text ?? '').Trim()
+    if ($t.Length -le $MaxLength) {
+        return $t
+    }
+
+    return ($t.Substring(0, $MaxLength) + '…')
 }
 
 function Get-TopCommentBasedHelpBlock {
@@ -96,48 +115,30 @@ function Get-TopCommentBasedHelpBlock {
     return $contentNoBom.Substring(0, $endIndex + 2)
 }
 
-function Get-HelpSectionText {
+function Convert-HelpTextToString {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$HelpBlock,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('SYNOPSIS', 'DESCRIPTION')]
-        [string]$Section
+        [Parameter(Mandatory = $false)]
+        $HelpText
     )
 
-    $pattern = "(?ims)^\s*\.$Section\s*(?<text>.*?)(?=^\s*\.\w+\b|\z)"
-    $m = [regex]::Match($HelpBlock, $pattern)
-    if (-not $m.Success) {
-        return $null
+    if ($null -eq $HelpText) {
+        return ''
     }
 
-    return ($m.Groups['text'].Value.Trim())
-}
+    if ($HelpText -is [string]) {
+        return $HelpText
+    }
 
-function Get-HelpParameterSections {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$HelpBlock
-    )
-
-    $paramSections = @{}
-
-    $pattern = '(?ims)^\s*\.PARAMETER\s+(?<name>\S+)\s*(?<text>.*?)(?=^\s*\.\w+\b|\z)'
-    $matches = [regex]::Matches($HelpBlock, $pattern)
-
-    foreach ($m in $matches) {
-        $name = $m.Groups['name'].Value.Trim()
-        $text = $m.Groups['text'].Value.Trim()
-
-        if (-not $name) {
-            continue
+    if ($HelpText.PSObject.Properties.Match('Text').Count -gt 0) {
+        $textValue = $HelpText.Text
+        if ($textValue -is [System.Array]) {
+            return ($textValue -join ' ')
         }
 
-        $paramSections[$name.ToLowerInvariant()] = $text
+        return [string]$textValue
     }
 
-    return $paramSections
+    return [string]$HelpText
 }
 
 function Get-DeclaredParameterNames {
@@ -195,14 +196,19 @@ function Assert-RunbookHelpIsComplete {
     )
 
     $content = Get-Content -LiteralPath $RunbookPath -Raw
-    $helpBlock = Get-TopCommentBasedHelpBlock -Content $content -PathForErrors $RunbookPath
+    $null = Get-TopCommentBasedHelpBlock -Content $content -PathForErrors $RunbookPath
 
-    $synopsis = Get-HelpSectionText -HelpBlock $helpBlock -Section 'SYNOPSIS'
+    $help = Get-Help -Full -Name $RunbookPath -ErrorAction SilentlyContinue
+    if (-not $help) {
+        throw "Get-Help could not read comment-based help. Ensure the header contains .SYNOPSIS, .DESCRIPTION and .PARAMETER sections and starts at the top of the file."
+    }
+
+    $synopsis = (Convert-HelpTextToString -HelpText $help.Synopsis).Trim()
     if (-not $synopsis) {
         throw "Missing or empty .SYNOPSIS section in comment-based help."
     }
 
-    $description = Get-HelpSectionText -HelpBlock $helpBlock -Section 'DESCRIPTION'
+    $description = (Convert-HelpTextToString -HelpText $help.Description).Trim()
     if (-not $description) {
         throw "Missing or empty .DESCRIPTION section in comment-based help."
     }
@@ -213,20 +219,31 @@ function Assert-RunbookHelpIsComplete {
     }
 
     if (& $normalize $synopsis -eq (& $normalize $description)) {
-        throw "Synopsis and Description must not be identical."
+        $synShort = Shorten-Text -Text $synopsis
+        $descShort = Shorten-Text -Text $description
+        throw "Synopsis and Description must not be identical. Make .DESCRIPTION more detailed than .SYNOPSIS. Seen Synopsis='$synShort' Description='$descShort'"
     }
 
     $declaredParams = Get-DeclaredParameterNames -FilePath $RunbookPath
-    $helpParams = Get-HelpParameterSections -HelpBlock $helpBlock
+    $helpParamMap = @{}
+    if ($help.Parameters -and $help.Parameters.Parameter) {
+        foreach ($hp in $help.Parameters.Parameter) {
+            if ($hp -and $hp.Name) {
+                $helpParamMap[$hp.Name.ToString().ToLowerInvariant()] = $hp
+            }
+        }
+    }
 
     foreach ($p in $declaredParams) {
         $key = $p.ToLowerInvariant()
 
-        if (-not $helpParams.ContainsKey($key)) {
+        if (-not $helpParamMap.ContainsKey($key)) {
             throw "Missing .PARAMETER section for parameter '$p'."
         }
 
-        if (-not ($helpParams[$key] -and $helpParams[$key].Trim() -ne '')) {
+        $hp = $helpParamMap[$key]
+        $paramDesc = (Convert-HelpTextToString -HelpText $hp.Description).Trim()
+        if (-not $paramDesc) {
             throw "Empty .PARAMETER description for parameter '$p'."
         }
     }
@@ -265,6 +282,7 @@ if (-not $changedPs1 -or $changedPs1.Count -eq 0) {
 }
 
 $failures = 0
+$failureList = @()
 
 foreach ($relPath in $changedPs1) {
     $path = Join-Path (Get-Location).Path $relPath
@@ -273,7 +291,7 @@ foreach ($relPath in $changedPs1) {
         continue
     }
 
-    Write-Output "Validating runbook: $relPath"
+    Write-Output "::group::Validate runbook: $relPath"
 
     try {
         Assert-RunbookHasPermissionsFile -RunbookPath $path
@@ -282,11 +300,20 @@ foreach ($relPath in $changedPs1) {
     }
     catch {
         $failures++
-        Write-GitHubError -Message $($_.Exception.Message) -FilePath $relPath
+        $message = $($_.Exception.Message)
+        $failureList += [PSCustomObject]@{ Runbook = $relPath; Message = $message }
+        Write-Output "FAILED: $relPath - $message"
+        Write-GitHubError -Message $message -FilePath $relPath
     }
+
+    Write-Output "::endgroup::"
 }
 
 if ($failures -gt 0) {
+    Write-Output ""
+    Write-Output "Validation summary"
+    Write-Output "------------------"
+    $failureList | Select-Object Runbook, Message | Format-Table -AutoSize | Out-String | Write-Output
     throw "Runbook validation failed for $failures file(s)."
 }
 
