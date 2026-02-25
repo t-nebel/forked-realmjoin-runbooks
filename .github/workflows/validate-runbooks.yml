@@ -1,0 +1,32 @@
+name: ✅ Validate runbooks
+
+on:
+  pull_request:
+    branches: [ master ]
+    paths:
+      - '**/*.ps1'
+      - '**/*.permissions.json'
+      - '**/*.permission.json'
+
+jobs:
+  validate-runbooks:
+    name: 🧪 Runbook checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 📦 Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+
+      - name: 🔍 Validate changed runbooks
+        shell: pwsh
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth=1
+          ./.github/scripts/Validate-Runbooks.ps1 -BaseRef "origin/${{ github.base_ref }}" -HeadRef "${{ github.sha }}"
