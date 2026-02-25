@@ -198,9 +198,12 @@ function Assert-RunbookHelpIsComplete {
     $content = Get-Content -LiteralPath $RunbookPath -Raw
     $null = Get-TopCommentBasedHelpBlock -Content $content -PathForErrors $RunbookPath
 
-    $help = Get-Help -Full -Name $RunbookPath -ErrorAction SilentlyContinue
-    if (-not $help) {
-        throw "Get-Help could not read comment-based help. Ensure the header contains .SYNOPSIS, .DESCRIPTION and .PARAMETER sections and starts at the top of the file."
+    $resolvedPath = (Resolve-Path -LiteralPath $RunbookPath -ErrorAction Stop).Path
+    try {
+        $help = Get-Help -Full $resolvedPath -ErrorAction Stop
+    }
+    catch {
+        throw "Get-Help failed to read comment-based help for '$resolvedPath'. Error: $($_.Exception.Message)"
     }
 
     $synopsis = (Convert-HelpTextToString -HelpText $help.Synopsis).Trim()
@@ -208,7 +211,7 @@ function Assert-RunbookHelpIsComplete {
         throw "Missing or empty .SYNOPSIS section in comment-based help."
     }
 
-    $description = (Convert-HelpTextToString -HelpText $help.Description).Trim()
+    $description = (Convert-HelpTextToString -HelpText $help.Description.Text).Trim()
     if (-not $description) {
         throw "Missing or empty .DESCRIPTION section in comment-based help."
     }
