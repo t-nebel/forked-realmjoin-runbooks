@@ -14,13 +14,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout Repository
+      - name: 📥 Checkout validator (master)
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          ref: master
+          fetch-depth: 1
+          path: validator
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/scripts/Validate-Runbooks.ps1
+
+      - name: 📥 Checkout PR (head)
+        uses: actions/checkout@v6
+        with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: repo
 
       - name: 🔍 Validate changed runbooks
         shell: pwsh
+        working-directory: repo
         run: |
-          ./.github/scripts/Validate-Runbooks.ps1 -BaseRef "${{ github.event.pull_request.base.sha }}" -HeadRef "${{ github.event.pull_request.head.sha }}"
+          ../validator/.github/scripts/Validate-Runbooks.ps1 -BaseRef "${{ github.event.pull_request.base.sha }}" -HeadRef "${{ github.event.pull_request.head.sha }}"
