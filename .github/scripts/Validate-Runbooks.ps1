@@ -383,12 +383,15 @@ try {
             Assert-RunbookHelpIsComplete -RunbookPath $path -RunbookRelativePath $relPath
 
             $successList += $relPath
+
+            Write-Output "OK: $relPath"
         }
         catch {
             $failures++
             $message = $($_.Exception.Message)
             $failureList += [PSCustomObject]@{ Runbook = $relPath; Message = $message }
-            Write-Output "FAILED: $relPath - $message"
+            Write-Output "FAILED: $relPath"
+            Write-WrappedText -Text $message -Width 140 -Indent "  "
             Write-GitHubError -Message $message -FilePath $relPath
         }
 
@@ -399,19 +402,34 @@ try {
     Write-Output "Validation summary"
     Write-Output "------------------"
 
+    $total = $changedPs1.Count
+    $successCount = $successList.Count
+    $failureCount = $failureList.Count
+    Write-Output ("Total runbooks validated: {0}" -f $total)
+    Write-Output ("Succeeded: {0}" -f $successCount)
+    Write-Output ("Failed: {0}" -f $failureCount)
+
     if ($successList.Count -gt 0) {
         Write-Output ""
-        Write-Output "Ohne fehler"
-        Write-Output "-----------"
+        Write-Output ("Runbooks without errors ({0})" -f $successCount)
+        Write-Output "--------------------------"
         foreach ($rb in ($successList | Sort-Object)) {
-            Write-Output $rb
+            Write-Output ("- {0}" -f $rb)
         }
     }
 
     if ($failureList.Count -gt 0) {
         Write-Output ""
-        Write-Output "Runbooks mit Fehlern"
-        Write-Output "--------------------"
+        Write-Output ("Runbooks with errors ({0})" -f $failureCount)
+        Write-Output "---------------------"
+
+        foreach ($f in $failureList) {
+            Write-Output ("- {0}" -f $f.Runbook)
+        }
+
+        Write-Output ""
+        Write-Output "Error details"
+        Write-Output "-------------"
 
         foreach ($f in $failureList) {
             Write-Output ""
@@ -423,12 +441,12 @@ try {
 
     if ($failures -gt 0) {
         Write-Output ""
-        Write-Output "Runbook validation failed for $failures file(s)."
+        Write-Output ("Runbook validation failed for {0} file(s)." -f $failures)
         exit 1
     }
 
     Write-Output ""
-    Write-Output "Runbook validation passed for $($changedPs1.Count) file(s)."
+    Write-Output ("Runbook validation passed for {0} file(s)." -f $changedPs1.Count)
     exit 0
 }
 catch {
