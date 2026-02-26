@@ -75,7 +75,16 @@ jobs:
           }
 
           if ($perm -ne 0 -or $rb -ne 0) {
-            exit 1
+            $parts = @()
+            if ($perm -ne 0) {
+              $parts += "permissions JSON validation failed (exit code: $perm)"
+            }
+            if ($rb -ne 0) {
+              $parts += "runbook validation failed (exit code: $rb)"
+            }
+
+            $msg = "Runbook validation workflow failed: " + ($parts -join "; ")
+            Write-Error -Message $msg -ErrorAction Stop
           }
 
           Write-Output "All validations passed."
