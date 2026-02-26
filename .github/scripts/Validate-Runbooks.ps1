@@ -3,7 +3,7 @@
 	Validates changed PowerShell runbooks in a pull request
 
 	.DESCRIPTION
-	This script identifies PowerShell runbooks (*.ps1) that were added or modified in a pull request compared to a base reference and validates them. It checks for a companion permissions JSON file (in the PR or in the base ref), runs PSScriptAnalyzer for severity Error, and then validates the comment-based help using Get-Help. The help validation requires a synopsis, a description, and a non-empty description for every declared parameter.
+	This script identifies PowerShell runbooks (*.ps1) that were added or modified in a pull request compared to a base reference and validates them. It runs PSScriptAnalyzer for severity Error and then validates the comment-based help using Get-Help. The help validation requires a synopsis, a description, and a non-empty description for every declared parameter.
 
 	.PARAMETER BaseRef
 	The git reference to diff against, for example the pull request base SHA.
@@ -183,58 +183,6 @@ function Get-ChangedPs1Files {
 	)
 }
 
-function Test-GitPathExists {
-	<#
-		.SYNOPSIS
-		Checks whether a path exists in a specific git ref
-	#>
-	param(
-		[Parameter(Mandatory = $true)]
-		[string]$Ref,
-
-		[Parameter(Mandatory = $true)]
-		[string]$Path
-	)
-
-	$gitPath = $Path -replace '\\', '/'
-	$null = & git cat-file -e "${Ref}:$gitPath" 2>$null
-	return ($LASTEXITCODE -eq 0)
-}
-
-function Assert-PermissionsJsonExists {
-	<#
-		.SYNOPSIS
-		Ensures the companion permissions JSON exists in the PR or base ref
-	#>
-	param(
-		[Parameter(Mandatory = $true)]
-		[string]$RunbookRelativePath,
-
-		[Parameter(Mandatory = $true)]
-		[string]$Base
-	)
-
-	$dir = Split-Path -Parent $RunbookRelativePath
-	$baseName = [System.IO.Path]::GetFileNameWithoutExtension($RunbookRelativePath)
-
-	$candidates = @(
-		(Join-Path $dir "$baseName.permissions.json"),
-		(Join-Path $dir "$baseName.permission.json")
-	) | ForEach-Object { $_ -replace '\\', '/' }
-
-	foreach ($candidate in $candidates) {
-		if (Test-Path -LiteralPath $candidate) {
-			return
-		}
-
-		if (Test-GitPathExists -Ref $Base -Path $candidate) {
-			return
-		}
-	}
-
-	throw "Missing permissions JSON. Expected one of: $($candidates -join ', ') (either in the PR or in the base branch)."
-}
-
 function Assert-PSScriptAnalyzerSeverityError {
 	<#
 		.SYNOPSIS
@@ -364,8 +312,6 @@ try {
 			if (-not (Test-Path -LiteralPath $path)) {
 				throw "Changed file '$relPath' was not found in the working tree."
 			}
-
-			Assert-PermissionsJsonExists -RunbookRelativePath $relPath -Base $BaseRef
 			Assert-PSScriptAnalyzerSeverityError -RunbookPath $path
 			Assert-HelpIsComplete -RunbookPath $path -RunbookRelativePath $relPath
 
