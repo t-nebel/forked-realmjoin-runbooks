@@ -1,457 +1,427 @@
 ﻿<#
-    .SYNOPSIS
-    Validates changed RealmJoin PowerShell runbooks in a pull request.
+	.SYNOPSIS
+	Validates changed PowerShell runbooks in a pull request
 
-    .DESCRIPTION
-    This script detects PowerShell runbooks that were added or modified compared to a base ref and validates their comment-based help header and companion permissions JSON file. It also runs PSScriptAnalyzer and fails the check on findings with severity Error or ParseError.
+	.DESCRIPTION
+	This script identifies PowerShell runbooks (*.ps1) that were added or modified in a pull request compared to a base reference and validates them. It checks for a companion permissions JSON file (in the PR or in the base ref), runs PSScriptAnalyzer for severity Error, and then validates the comment-based help using Get-Help. The help validation requires a synopsis, a description, and a non-empty description for every declared parameter.
 
-    .PARAMETER BaseRef
-    The git reference to diff against, for example "origin/master".
+	.PARAMETER BaseRef
+	The git reference to diff against, for example the pull request base SHA.
 
-    .PARAMETER HeadRef
-    The git reference that contains the changes to validate, for example "HEAD".
+	.PARAMETER HeadRef
+	The git reference that contains the changes to validate, for example the pull request head SHA.
 #>
 
 param (
-    [Parameter(Mandatory = $true)]
-    [string]$BaseRef,
+	[Parameter(Mandatory = $true)]
+	[string]$BaseRef,
 
-    [Parameter(Mandatory = $true)]
-    [string]$HeadRef
+	[Parameter(Mandatory = $true)]
+	[string]$HeadRef
 )
 
 Set-StrictMode -Version Latest
 
+############################################################
+#region Functions
+#
+############################################################
+
 function Write-GitHubError {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Message,
+	<#
+		.SYNOPSIS
+		Emits a GitHub Actions error annotation
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Message,
 
-        [Parameter(Mandatory = $false)]
-        [string]$FilePath
-    )
+		[Parameter(Mandatory = $false)]
+		[string]$FilePath
+	)
 
-    if ($FilePath) {
-        # GitHub Actions annotation
-        Write-Output "::error file=$FilePath,title=Runbook validation failed::$Message"
-    }
-    else {
-        # GitHub Actions annotation (no file context)
-        Write-Output "::error title=Runbook validation failed::$Message"
-    }
-}
+	if ($FilePath) {
+		Write-Output "::error file=$FilePath,title=Runbook validation failed::$Message"
+		return
+	}
 
-function Get-ChangedFiles {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Base,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Head
-    )
-
-    # In pull_request workflows, HeadRef is typically a merge commit. To reliably get the PR
-    # changes (and not an arbitrary base SHA from the payload), prefer diffing between the
-    # merge commit parents: base-parent..pr-head-parent.
-    $parentsLine = & git rev-list --parents -n 1 $Head 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to inspect HeadRef '$Head' via git rev-list. Error: $($parentsLine | Out-String)"
-    }
-
-    $parts = ($parentsLine -split '\s+' | Where-Object { $_ -and $_.Trim() -ne '' })
-    $isMergeCommit = ($parts.Count -ge 3)
-
-    if ($isMergeCommit) {
-        $baseParent = $parts[1]
-        $prParent = $parts[2]
-        $diffArgs = @('diff', '--name-only', '--diff-filter=AM', "$baseParent..$prParent")
-    }
-    else {
-        $diffArgs = @('diff', '--name-only', '--diff-filter=AM', "$Base..$Head")
-    }
-
-    try {
-        $output = & git @diffArgs 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw ($output | Out-String)
-        }
-    }
-    catch {
-        throw "Failed to determine changed files via git diff. BaseRef='$Base', HeadRef='$Head'. Error: $($_.Exception.Message)"
-    }
-
-    return ($output | Where-Object { $_ -and $_.Trim() -ne '' } | ForEach-Object { $_.Trim() })
-}
-
-function Shorten-Text {
-    param(
-        [Parameter(Mandatory = $false)]
-        [string]$Text,
-
-        [Parameter(Mandatory = $false)]
-        [int]$MaxLength = 240
-    )
-
-    $t = ($Text ?? '').Trim()
-    if ($t.Length -le $MaxLength) {
-        return $t
-    }
-
-    return ($t.Substring(0, $MaxLength) + '…')
-}
-
-function Get-TopCommentBasedHelpBlock {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Content,
-
-        [Parameter(Mandatory = $true)]
-        [string]$PathForErrors
-    )
-
-    $contentNoBom = $Content -replace '^\uFEFF', ''
-    $firstNonWs = [regex]::Match($contentNoBom, '(?s)\S')
-    if (-not $firstNonWs.Success) {
-        throw "File is empty."
-    }
-
-    if ($firstNonWs.Index -ne 0) {
-        # allow leading whitespace/newlines, but require the first non-whitespace token to start the help block
-        $contentNoBom = $contentNoBom.Substring($firstNonWs.Index)
-    }
-
-    if (-not $contentNoBom.StartsWith('<#')) {
-        throw "Missing comment-based help header. The file must start with '<#' as the first non-whitespace content."
-    }
-
-    $endIndex = $contentNoBom.IndexOf('#>')
-    if ($endIndex -lt 0) {
-        throw "Comment-based help header is not closed. Missing '#>'."
-    }
-
-    return $contentNoBom.Substring(0, $endIndex + 2)
-}
-
-function Convert-HelpTextToString {
-    param(
-        [Parameter(Mandatory = $false)]
-        $HelpText
-    )
-
-    if ($null -eq $HelpText) {
-        return ''
-    }
-
-    if ($HelpText -is [string]) {
-        return $HelpText
-    }
-
-    if ($HelpText.PSObject.Properties.Match('Text').Count -gt 0) {
-        $textValue = $HelpText.Text
-        if ($textValue -is [System.Array]) {
-            return ($textValue -join ' ')
-        }
-
-        return [string]$textValue
-    }
-
-    return [string]$HelpText
-}
-
-function Get-DeclaredParameterNames {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$FilePath
-    )
-
-    $tokens = $null
-    $errors = $null
-    $ast = [System.Management.Automation.Language.Parser]::ParseFile($FilePath, [ref]$tokens, [ref]$errors)
-
-    if ($errors -and $errors.Count -gt 0) {
-        $first = $errors | Select-Object -First 1
-        throw "PowerShell parse error: $($first.Message)"
-    }
-
-    $paramBlock = $ast.ParamBlock
-    if (-not $paramBlock) {
-        return @()
-    }
-
-    return @(
-        $paramBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
-    )
-}
-
-function Assert-RunbookHasPermissionsFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$RunbookPath
-    )
-
-    $dir = Split-Path -Parent $RunbookPath
-    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($RunbookPath)
-
-    $primary = Join-Path $dir "$baseName.permissions.json"
-    $alt = Join-Path $dir "$baseName.permission.json"
-
-    if (Test-Path -LiteralPath $primary) {
-        return
-    }
-
-    if (Test-Path -LiteralPath $alt) {
-        return
-    }
-
-    throw "Missing permissions JSON. Expected '$primary' (preferred) or '$alt'."
-}
-
-function Assert-RunbookHelpIsComplete {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$RunbookPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$RunbookRelativePath
-    )
-
-    $content = Get-Content -LiteralPath $RunbookPath -Raw
-    $null = Get-TopCommentBasedHelpBlock -Content $content -PathForErrors $RunbookPath
-
-    $resolvedPath = (Resolve-Path -LiteralPath $RunbookPath -ErrorAction Stop).Path
-    $helpTarget = $RunbookRelativePath -replace '\\', '/'
-    if (-not ($helpTarget.StartsWith('./') -or $helpTarget.StartsWith('.\\'))) {
-        $helpTarget = "./$helpTarget"
-    }
-    try {
-        $help = Get-Help -Full $helpTarget -ErrorAction Stop
-    }
-    catch {
-        throw "Get-Help failed to read comment-based help for '$helpTarget' ('$resolvedPath'). Error: $($_.Exception.Message)"
-    }
-
-    $synopsis = (Convert-HelpTextToString -HelpText $help.Synopsis).Trim()
-    if (-not $synopsis) {
-        throw "Missing or empty .SYNOPSIS section in comment-based help."
-    }
-
-    $description = (Convert-HelpTextToString -HelpText $help.Description.Text).Trim()
-    if (-not $description) {
-        throw "Missing or empty .DESCRIPTION section in comment-based help."
-    }
-
-    $normalize = {
-        param([string]$s)
-        return (($s ?? '') -replace '\s+', ' ').Trim().ToLowerInvariant()
-    }
-
-    if ((& $normalize $synopsis) -eq (& $normalize $description)) {
-        $synShort = Shorten-Text -Text $synopsis
-        $descShort = Shorten-Text -Text $description
-        throw "Synopsis and Description must not be identical. Make .DESCRIPTION more detailed than .SYNOPSIS. Seen Synopsis='$synShort' Description='$descShort'"
-    }
-
-    $declaredParams = Get-DeclaredParameterNames -FilePath $RunbookPath
-    $helpParamMap = @{}
-    if ($help.Parameters -and $help.Parameters.Parameter) {
-        foreach ($hp in $help.Parameters.Parameter) {
-            if ($hp -and $hp.Name) {
-                $helpParamMap[$hp.Name.ToString().ToLowerInvariant()] = $hp
-            }
-        }
-    }
-
-    foreach ($p in $declaredParams) {
-        $key = $p.ToLowerInvariant()
-
-        if (-not $helpParamMap.ContainsKey($key)) {
-            throw "Missing .PARAMETER section for parameter '$p'."
-        }
-
-        $hp = $helpParamMap[$key]
-        $paramDesc = (Convert-HelpTextToString -HelpText $hp.Description).Trim()
-        if (-not $paramDesc) {
-            throw "Empty .PARAMETER description for parameter '$p'."
-        }
-    }
-}
-
-function Assert-RunbookPassesScriptAnalyzer {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$RunbookPath
-    )
-
-    if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
-        throw "PSScriptAnalyzer module is not available. Install it (e.g. Install-Module PSScriptAnalyzer) before running this check."
-    }
-
-    try {
-        # Do not filter by -Severity here.
-        # PSScriptAnalyzer reports syntax issues as Severity 'ParseError', which would be missed
-        # when only requesting 'Error'. We filter below to block on both.
-        $results = Invoke-ScriptAnalyzer -Path $RunbookPath
-    }
-    catch {
-        throw "PSScriptAnalyzer failed to analyze '$RunbookPath'. Error: $($_.Exception.Message)"
-    }
-
-    $blocking = @()
-    if ($results) {
-        $blocking = $results | Where-Object { $_.Severity -in @('Error', 'ParseError') }
-    }
-
-    if ($blocking -and $blocking.Count -gt 0) {
-        $messages = $blocking | ForEach-Object {
-            $line = if ($_.Line) { "Line $($_.Line)" } else { "" }
-            "[$($_.Severity)] $($_.RuleName) $($line): $($_.Message)"
-        }
-
-        throw ("PSScriptAnalyzer findings:`n" + ($messages -join "`n"))
-    }
+	Write-Output "::error title=Runbook validation failed::$Message"
 }
 
 function Write-WrappedText {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Text,
+	<#
+		.SYNOPSIS
+		Writes long text with simple word-wrapping
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Text,
 
-        [Parameter(Mandatory = $false)]
-        [int]$Width = 140,
+		[Parameter(Mandatory = $false)]
+		[int]$Width = 140,
 
-        [Parameter(Mandatory = $false)]
-        [string]$Indent = "  "
-    )
+		[Parameter(Mandatory = $false)]
+		[string]$Indent = "  "
+	)
 
-    $splitLines = $Text -split "`r`n|`n|`r"
-    foreach ($rawLine in $splitLines) {
-        $line = ($rawLine ?? '').TrimEnd()
-        if (-not $line) {
-            Write-Output ""
-            continue
-        }
+	$splitLines = $Text -split "`r`n|`n|`r"
+	foreach ($rawLine in $splitLines) {
+		$line = ($rawLine ?? '').TrimEnd()
+		if (-not $line) {
+			Write-Output ""
+			continue
+		}
 
-        $remaining = $line
-        while ($remaining.Length -gt $Width) {
-            $breakAt = $remaining.LastIndexOf(' ', $Width)
-            if ($breakAt -lt 20) {
-                $breakAt = $Width
-            }
-            Write-Output ($Indent + $remaining.Substring(0, $breakAt).TrimEnd())
-            $remaining = $remaining.Substring($breakAt).TrimStart()
-        }
+		$remaining = $line
+		while ($remaining.Length -gt $Width) {
+			$breakAt = $remaining.LastIndexOf(' ', $Width)
+			if ($breakAt -lt 20) {
+				$breakAt = $Width
+			}
+			Write-Output ($Indent + $remaining.Substring(0, $breakAt).TrimEnd())
+			$remaining = $remaining.Substring($breakAt).TrimStart()
+		}
 
-        if ($remaining) {
-            Write-Output ($Indent + $remaining)
-        }
-    }
+		if ($remaining) {
+			Write-Output ($Indent + $remaining)
+		}
+	}
 }
+
+function Convert-HelpTextToString {
+	<#
+		.SYNOPSIS
+		Normalizes Get-Help text objects into a single string
+	#>
+	param(
+		[Parameter(Mandatory = $false)]
+		$HelpText
+	)
+
+	if ($null -eq $HelpText) {
+		return ''
+	}
+
+	if ($HelpText -is [string]) {
+		return $HelpText
+	}
+
+	if ($HelpText -is [System.Array]) {
+		return (($HelpText | ForEach-Object { Convert-HelpTextToString -HelpText $_ }) -join ' ')
+	}
+
+	if ($HelpText.PSObject -and $HelpText.PSObject.Properties.Match('Text').Count -gt 0) {
+		return (Convert-HelpTextToString -HelpText $HelpText.Text)
+	}
+
+	return [string]$HelpText
+}
+
+function Get-DeclaredParameterNames {
+	<#
+		.SYNOPSIS
+		Returns parameter names declared in a script's param() block
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$FilePath
+	)
+
+	$tokens = $null
+	$errors = $null
+	$ast = [System.Management.Automation.Language.Parser]::ParseFile($FilePath, [ref]$tokens, [ref]$errors)
+
+	if ($errors -and $errors.Count -gt 0) {
+		$first = $errors | Select-Object -First 1
+		throw "PowerShell parse error: $($first.Message)"
+	}
+
+	if (-not $ast.ParamBlock) {
+		return @()
+	}
+
+	return @(
+		$ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
+	)
+}
+
+function Get-ChangedPs1Files {
+	<#
+		.SYNOPSIS
+		Gets added/modified/renamed .ps1 files between two git refs
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Base,
+
+		[Parameter(Mandatory = $true)]
+		[string]$Head
+	)
+
+	$diffArgs = @(
+		'diff',
+		'--name-only',
+		'--diff-filter=AMR',
+		"$Base..$Head",
+		'--',
+		'*.ps1'
+	)
+
+	$names = & git @diffArgs 2>&1
+	if ($LASTEXITCODE -ne 0) {
+		throw "git diff failed. Args='$($diffArgs -join ' ')'. Output: $($names | Out-String)"
+	}
+
+	$changed = @(
+		$names | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+	)
+
+	return @(
+		$changed
+		| ForEach-Object { $_ -replace '\\', '/' }
+		| Where-Object { -not $_.ToLowerInvariant().StartsWith('.github/') }
+	)
+}
+
+function Test-GitPathExists {
+	<#
+		.SYNOPSIS
+		Checks whether a path exists in a specific git ref
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$Ref,
+
+		[Parameter(Mandatory = $true)]
+		[string]$Path
+	)
+
+	$gitPath = $Path -replace '\\', '/'
+	$null = & git cat-file -e "${Ref}:$gitPath" 2>$null
+	return ($LASTEXITCODE -eq 0)
+}
+
+function Assert-PermissionsJsonExists {
+	<#
+		.SYNOPSIS
+		Ensures the companion permissions JSON exists in the PR or base ref
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$RunbookRelativePath,
+
+		[Parameter(Mandatory = $true)]
+		[string]$Base
+	)
+
+	$dir = Split-Path -Parent $RunbookRelativePath
+	$baseName = [System.IO.Path]::GetFileNameWithoutExtension($RunbookRelativePath)
+
+	$candidates = @(
+		(Join-Path $dir "$baseName.permissions.json"),
+		(Join-Path $dir "$baseName.permission.json")
+	) | ForEach-Object { $_ -replace '\\', '/' }
+
+	foreach ($candidate in $candidates) {
+		if (Test-Path -LiteralPath $candidate) {
+			return
+		}
+
+		if (Test-GitPathExists -Ref $Base -Path $candidate) {
+			return
+		}
+	}
+
+	throw "Missing permissions JSON. Expected one of: $($candidates -join ', ') (either in the PR or in the base branch)."
+}
+
+function Assert-PSScriptAnalyzerSeverityError {
+	<#
+		.SYNOPSIS
+		Runs PSScriptAnalyzer and fails if it reports severity Error
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$RunbookPath
+	)
+
+	if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+		throw "PSScriptAnalyzer module is not available on the runner."
+	}
+
+	try {
+		$results = Invoke-ScriptAnalyzer -Path $RunbookPath -Severity @('Error')
+	}
+	catch {
+		throw "PSScriptAnalyzer failed to analyze '$RunbookPath'. Error: $($_.Exception.Message)"
+	}
+
+	if ($results -and $results.Count -gt 0) {
+		$messages = $results | ForEach-Object {
+			$line = if ($_.Line) { "Line $($_.Line)" } else { "" }
+			"[$($_.Severity)] $($_.RuleName) $($line): $($_.Message)"
+		}
+
+		throw ("PSScriptAnalyzer findings:`n" + ($messages -join "`n"))
+	}
+}
+
+function Assert-HelpIsComplete {
+	<#
+		.SYNOPSIS
+		Validates comment-based help via Get-Help
+	#>
+	param(
+		[Parameter(Mandatory = $true)]
+		[string]$RunbookPath,
+
+		[Parameter(Mandatory = $true)]
+		[string]$RunbookRelativePath
+	)
+
+	$helpTarget = $RunbookRelativePath -replace '\\', '/'
+	if (-not $helpTarget.StartsWith('./')) {
+		$helpTarget = "./$helpTarget"
+	}
+
+	try {
+		$help = Get-Help -Full $helpTarget -ErrorAction Stop
+	}
+	catch {
+		throw "Get-Help failed to read comment-based help for '$helpTarget'. Error: $($_.Exception.Message)"
+	}
+
+	$synopsis = (Convert-HelpTextToString -HelpText $help.Synopsis).Trim()
+	if (-not $synopsis) {
+		throw "Missing or empty help synopsis (.SYNOPSIS)."
+	}
+
+	$description = (Convert-HelpTextToString -HelpText $help.Description.Text).Trim()
+	if (-not $description) {
+		throw "Missing or empty help description (.DESCRIPTION)."
+	}
+
+	$declaredParams = Get-DeclaredParameterNames -FilePath $RunbookPath
+	if ($declaredParams.Count -eq 0) {
+		return
+	}
+
+	$helpParamMap = @{}
+	if ($help.Parameters -and $help.Parameters.Parameter) {
+		foreach ($hp in $help.Parameters.Parameter) {
+			if ($hp -and $hp.Name) {
+				$helpParamMap[$hp.Name.ToString().ToLowerInvariant()] = $hp
+			}
+		}
+	}
+
+	foreach ($p in $declaredParams) {
+		$key = $p.ToLowerInvariant()
+		if (-not $helpParamMap.ContainsKey($key)) {
+			throw "Missing help parameter documentation (.PARAMETER) for '$p'."
+		}
+
+		$hp = $helpParamMap[$key]
+		$paramDesc = (Convert-HelpTextToString -HelpText $hp.Description).Trim()
+		if (-not $paramDesc) {
+			throw "Empty help parameter description for '$p'."
+		}
+	}
+}
+
+#endregion Functions
+
+############################################################
+#region Main Logic
+#
+############################################################
 
 try {
-    $changed = @(
-        Get-ChangedFiles -Base $BaseRef -Head $HeadRef
-    )
+	$changedPs1 = @(Get-ChangedPs1Files -Base $BaseRef -Head $HeadRef)
+	if ($changedPs1.Count -eq 0) {
+		Write-Output "No changed runbooks (*.ps1) detected. Skipping validation."
+		exit 0
+	}
 
-    $changedPs1 = @(
-        $changed | Where-Object {
-            $_.ToLowerInvariant().EndsWith('.ps1') -and
-            -not $_.ToLowerInvariant().StartsWith('.github/')
-        }
-    )
+	$successList = @()
+	$failureList = @()
 
-    if ($changedPs1.Count -eq 0) {
-        Write-Output "No changed runbooks (*.ps1) detected. Skipping validation."
-        exit 0
-    }
+	foreach ($relPath in $changedPs1) {
+		$path = Join-Path (Get-Location).Path $relPath
 
-    $failures = 0
-    $failureList = @()
-    $successList = @()
+		Write-Output "::group::Validate runbook: $relPath"
+		try {
+			if (-not (Test-Path -LiteralPath $path)) {
+				throw "Changed file '$relPath' was not found in the working tree."
+			}
 
-    foreach ($relPath in $changedPs1) {
-        $path = Join-Path (Get-Location).Path $relPath
+			Assert-PermissionsJsonExists -RunbookRelativePath $relPath -Base $BaseRef
+			Assert-PSScriptAnalyzerSeverityError -RunbookPath $path
+			Assert-HelpIsComplete -RunbookPath $path -RunbookRelativePath $relPath
 
-        if (-not (Test-Path -LiteralPath $path)) {
-            continue
-        }
+			$successList += $relPath
+			Write-Output "OK: $relPath"
+		}
+		catch {
+			$message = $($_.Exception.Message)
+			$failureList += [PSCustomObject]@{ Runbook = $relPath; Message = $message }
+			Write-Output "FAILED: $relPath"
+			Write-WrappedText -Text $message -Width 140 -Indent "  "
+			Write-GitHubError -Message $message -FilePath $relPath
+		}
+		Write-Output "::endgroup::"
+	}
 
-        Write-Output "::group::Validate runbook: $relPath"
+	Write-Output ""
+	Write-Output "Validation summary"
+	Write-Output "------------------"
+	Write-Output ("Total runbooks validated: {0}" -f $changedPs1.Count)
+	Write-Output ("Succeeded: {0}" -f $successList.Count)
+	Write-Output ("Failed: {0}" -f $failureList.Count)
 
-        try {
-            Assert-RunbookHasPermissionsFile -RunbookPath $path
-            Assert-RunbookPassesScriptAnalyzer -RunbookPath $path
-            Assert-RunbookHelpIsComplete -RunbookPath $path -RunbookRelativePath $relPath
+	if ($successList.Count -gt 0) {
+		Write-Output ""
+		Write-Output ("Runbooks without errors ({0})" -f $successList.Count)
+		Write-Output "--------------------------"
+		foreach ($rb in ($successList | Sort-Object)) {
+			Write-Output ("- {0}" -f $rb)
+		}
+	}
 
-            $successList += $relPath
+	if ($failureList.Count -gt 0) {
+		Write-Output ""
+		Write-Output ("Runbooks with errors ({0})" -f $failureList.Count)
+		Write-Output "---------------------"
+		foreach ($f in $failureList) {
+			Write-Output ("- {0}" -f $f.Runbook)
+		}
 
-            Write-Output "OK: $relPath"
-        }
-        catch {
-            $failures++
-            $message = $($_.Exception.Message)
-            $failureList += [PSCustomObject]@{ Runbook = $relPath; Message = $message }
-            Write-Output "FAILED: $relPath"
-            Write-WrappedText -Text $message -Width 140 -Indent "  "
-            Write-GitHubError -Message $message -FilePath $relPath
-        }
+		Write-Output ""
+		Write-Output "Error details"
+		Write-Output "-------------"
+		foreach ($f in $failureList) {
+			Write-Output ""
+			Write-Output $f.Runbook
+			Write-Output ("-" * [Math]::Min(120, [Math]::Max(3, $f.Runbook.Length)))
+			Write-WrappedText -Text $f.Message -Width 140 -Indent "  "
+		}
+	}
 
-        Write-Output "::endgroup::"
-    }
+	if ($failureList.Count -gt 0) {
+		Write-Output ""
+		Write-Output ("Runbook validation failed for {0} file(s)." -f $failureList.Count)
+		exit 1
+	}
 
-    Write-Output ""
-    Write-Output "Validation summary"
-    Write-Output "------------------"
-
-    $total = $changedPs1.Count
-    $successCount = $successList.Count
-    $failureCount = $failureList.Count
-    Write-Output ("Total runbooks validated: {0}" -f $total)
-    Write-Output ("Succeeded: {0}" -f $successCount)
-    Write-Output ("Failed: {0}" -f $failureCount)
-
-    if ($successList.Count -gt 0) {
-        Write-Output ""
-        Write-Output ("Runbooks without errors ({0})" -f $successCount)
-        Write-Output "--------------------------"
-        foreach ($rb in ($successList | Sort-Object)) {
-            Write-Output ("- {0}" -f $rb)
-        }
-    }
-
-    if ($failureList.Count -gt 0) {
-        Write-Output ""
-        Write-Output ("Runbooks with errors ({0})" -f $failureCount)
-        Write-Output "---------------------"
-
-        foreach ($f in $failureList) {
-            Write-Output ("- {0}" -f $f.Runbook)
-        }
-
-        Write-Output ""
-        Write-Output "Error details"
-        Write-Output "-------------"
-
-        foreach ($f in $failureList) {
-            Write-Output ""
-            Write-Output $f.Runbook
-            Write-Output ("-" * [Math]::Min(120, [Math]::Max(3, $f.Runbook.Length)))
-            Write-WrappedText -Text $f.Message -Width 140 -Indent "  "
-        }
-    }
-
-    if ($failures -gt 0) {
-        Write-Output ""
-        Write-Output ("Runbook validation failed for {0} file(s)." -f $failures)
-        exit 1
-    }
-
-    Write-Output ""
-    Write-Output ("Runbook validation passed for {0} file(s)." -f $changedPs1.Count)
-    exit 0
+	Write-Output ""
+	Write-Output ("Runbook validation passed for {0} file(s)." -f $changedPs1.Count)
+	exit 0
 }
 catch {
-    $message = "Validator failed unexpectedly. Error: $($_.Exception.Message)"
-    Write-Output $message
-    Write-GitHubError -Message $message
-    exit 1
+	$message = "Validator failed unexpectedly. Error: $($_.Exception.Message)"
+	Write-Output $message
+	Write-GitHubError -Message $message
+	exit 1
 }
+
+#endregion Main Logic
