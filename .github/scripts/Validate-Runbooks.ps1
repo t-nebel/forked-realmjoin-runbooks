@@ -250,7 +250,8 @@ function Assert-PSScriptAnalyzerSeverityError {
 	}
 
 	try {
-		$results = Invoke-ScriptAnalyzer -Path $RunbookPath -Severity @('Error')
+		$ErrorRules = Get-ScriptAnalyzerRule -Severity Error
+		$results = Invoke-ScriptAnalyzer -Path $RunbookPath -IncludeRule $ErrorRules
 	}
 	catch {
 		throw "PSScriptAnalyzer failed to analyze '$RunbookPath'. Error: $($_.Exception.Message)"
