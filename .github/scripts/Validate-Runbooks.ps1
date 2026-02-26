@@ -302,6 +302,15 @@ function Assert-HelpIsComplete {
 		throw "Missing or empty help description (.DESCRIPTION)."
 	}
 
+	$normalize = {
+		param([string]$s)
+		return (($s ?? '') -replace '\s+', ' ').Trim().ToLowerInvariant()
+	}
+
+	if ((& $normalize $synopsis) -eq (& $normalize $description)) {
+		throw "Synopsis and Description must not be identical. Make .DESCRIPTION more detailed than .SYNOPSIS."
+	}
+
 	$declaredParams = Get-DeclaredParameterNames -FilePath $RunbookPath
 	if ($declaredParams.Count -eq 0) {
 		return
