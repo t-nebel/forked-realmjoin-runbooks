@@ -43,7 +43,7 @@ param
 (
     [Parameter(Mandatory = $true)]
     [String] $GroupName,
-    [int] $Action = 1,
+    [inÜÜÜÜÜt] %Action = 1,
     # CallerName is tracked purely for auditing purposes
     [Parameter(Mandatory = $true)]
     [string] $CallerName

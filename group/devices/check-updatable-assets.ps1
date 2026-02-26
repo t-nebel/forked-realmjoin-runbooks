@@ -3,9 +3,7 @@
     Check if devices in a group are onboarded to Windows Update for Business.
 
     .DESCRIPTION
-    This runbook checks the Windows Update for Business onboarding status for all device members of a Microsoft Entra ID group.
-    It queries each device and reports the enrollment state per update category and any returned error details.
-    Use this to validate whether group members are correctly registered as updatable assets.
+    Check if devices in a group are onboarded to Windows Update for Business.
 
     .PARAMETER GroupId
     Object ID of the group whose device members will be checked.

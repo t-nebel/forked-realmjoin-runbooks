@@ -8,7 +8,11 @@
    - This runbook retrieves and displays the BitLocker recovery key for a specified device.
 
 ## 2026-02-24
+
 - Update **Unenroll Updatable Assets** to **Unenroll Updatable Assets (Scheduled)** (in group/general)
+  - Add option to include user owned devices in the unenrollment process, which allows for a more comprehensive management of updatable assets by optionally targeting devices that are owned by users which are in membership of the specified group.
+- Update **List Admin Users** Runbook
+  - Add output of PIM role assignment status (permanent vs eligible) and expiration date to the runbook output and CSV export.
 
 ## 2026-02-20
 
@@ -18,7 +22,7 @@
 - Update **Export All Intune Devices** Runbook
   - Fix issue, regarding some properties if the device primary user data is missing or incomplete
   - Add filtering option to only include devices that are members of a specific group to avoid exporting all devices in large tenants and to focus on relevant devices.
-- Complete overhaul of the comment-based help in all runbooks to improve clarity, consistency and detail of the documentation, including:
+- Complete overhaul of the comment-based help in **all runbooks** to improve clarity, consistency and detail of the documentation, including:
   - More detailed descriptions of the runbooks' functionality and parameters
   - Clearer instructions for required permissions and setup steps
   - Improved formatting for better readability
