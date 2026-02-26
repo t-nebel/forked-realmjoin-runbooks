@@ -3,7 +3,7 @@
 	Validates that each runbook has a companion permissions JSON
 
 	.DESCRIPTION
-	This script recursively scans one or more runbook root folders for PowerShell runbooks (*.ps1) and verifies that each runbook has a companion permissions JSON file in the same directory. A companion file is considered present if either <runbook>.permissions.json or <runbook>.permission.json exists. The script prints a clear summary and exits with code 1 when any runbook is missing its companion permissions JSON.
+	This script recursively scans one or more runbook root folders for PowerShell runbooks (*.ps1) and verifies that each runbook has a companion permissions JSON file in the same directory. A companion file must be named <runbook>.permissions.json. If a file named <runbook>.permission.json exists instead, it is reported as an error to ease troubleshooting. The script prints a clear summary and exits with code 1 when any runbook is missing its companion permissions JSON or has the wrong filename.
 
 	.PARAMETER IncludedScope
 	One or more root folders that contain runbooks, for example @('device','group','org','user'). Each scope is scanned recursively.
@@ -123,30 +123,40 @@ try {
 	}
 
 	$missing = @()
+	$wrongName = @()
 	foreach ($rb in $runbooks) {
 		$rbRel = Get-RelativePath -Path $rb.FullName
-		$candidates = Get-CompanionPermissionsCandidates -RunbookPath $rb.FullName
-		$found = $false
-		foreach ($c in $candidates) {
-			if (Test-Path -LiteralPath $c) {
-				$found = $true
-				break
-			}
+
+		$dirRel = (Split-Path -Parent $rbRel) -replace '\\', '/'
+		$base = [System.IO.Path]::GetFileNameWithoutExtension($rbRel)
+		$expectedPreferred = if ($dirRel) { "$dirRel/$base.permissions.json" } else { "$base.permissions.json" }
+		$expectedAlt = if ($dirRel) { "$dirRel/$base.permission.json" } else { "$base.permission.json" }
+
+		$preferredFull = Join-Path (Split-Path -Parent $rb.FullName) "$base.permissions.json"
+		$altFull = Join-Path (Split-Path -Parent $rb.FullName) "$base.permission.json"
+		$hasPreferred = Test-Path -LiteralPath $preferredFull
+		$hasAlt = Test-Path -LiteralPath $altFull
+
+		if ($hasPreferred) {
+			continue
 		}
 
-		if (-not $found) {
-			$dirRel = (Split-Path -Parent $rbRel) -replace '\\', '/'
-			$base = [System.IO.Path]::GetFileNameWithoutExtension($rbRel)
-			$expectedPreferred = if ($dirRel) { "$dirRel/$base.permissions.json" } else { "$base.permissions.json" }
-			$expectedAlt = if ($dirRel) { "$dirRel/$base.permission.json" } else { "$base.permission.json" }
-
-			$msg = "Missing companion permissions JSON. Expected '$expectedPreferred' (preferred) or '$expectedAlt'."
-			$missing += [PSCustomObject]@{ Runbook = $rbRel; Message = $msg }
-			Write-Output "::group::Missing permissions JSON: $rbRel"
+		if ($hasAlt) {
+			$msg = "Found '$expectedAlt' but expected '$expectedPreferred'. Rename the file to use the required '.permissions.json' suffix."
+			$wrongName += [PSCustomObject]@{ Runbook = $rbRel; Message = $msg; File = $expectedAlt }
+			Write-Output "::group::Wrong permissions JSON filename: $rbRel"
 			Write-Output "FAILED: $rbRel"
-			Write-GitHubError -Message $msg -FilePath $rbRel
+			Write-GitHubError -Message $msg -FilePath $expectedAlt
 			Write-Output "::endgroup::"
+			continue
 		}
+
+		$msg = "Missing companion permissions JSON. Expected '$expectedPreferred'."
+		$missing += [PSCustomObject]@{ Runbook = $rbRel; Message = $msg }
+		Write-Output "::group::Missing permissions JSON: $rbRel"
+		Write-Output "FAILED: $rbRel"
+		Write-GitHubError -Message $msg -FilePath $rbRel
+		Write-Output "::endgroup::"
 	}
 
 	Write-Output ""
@@ -154,6 +164,7 @@ try {
 	Write-Output "----------------------------------"
 	Write-Output ("Total runbooks scanned: {0}" -f $runbooks.Count)
 	Write-Output ("Missing permissions JSON: {0}" -f $missing.Count)
+	Write-Output ("Wrong permissions JSON filename: {0}" -f $wrongName.Count)
 
 	if ($missing.Count -gt 0) {
 		Write-Output ""
@@ -165,9 +176,23 @@ try {
 			Write-Output ("-" * [Math]::Min(120, [Math]::Max(3, $m.Runbook.Length)))
 			Write-Output ("  " + $m.Message)
 		}
+	}
 
+	if ($wrongName.Count -gt 0) {
 		Write-Output ""
-		Write-Output ("Permissions JSON validation failed for {0} runbook(s)." -f $missing.Count)
+		Write-Output "Wrong permissions JSON filename (details)"
+		Write-Output "----------------------------------------"
+		foreach ($w in $wrongName) {
+			Write-Output ""
+			Write-Output $w.Runbook
+			Write-Output ("-" * [Math]::Min(120, [Math]::Max(3, $w.Runbook.Length)))
+			Write-Output ("  " + $w.Message)
+		}
+	}
+
+	if (($missing.Count -gt 0) -or ($wrongName.Count -gt 0)) {
+		Write-Output ""
+		Write-Output ("Permissions JSON validation failed for {0} runbook(s)." -f ($missing.Count + $wrongName.Count))
 		exit 1
 	}
 
