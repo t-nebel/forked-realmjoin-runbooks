@@ -84,7 +84,36 @@ jobs:
             }
 
             $msg = "Runbook validation workflow failed: " + ($parts -join "; ")
+
+            # Job summary (visible in the workflow run UI)
+            if ($env:GITHUB_STEP_SUMMARY) {
+              $lines = @(
+                "## Runbook validation summary",
+                "",
+                "| Area | Result |",
+                "|------|--------|",
+                ("| Permissions JSON | {0} |" -f ($(if ($perm -eq 0) { '✅ Pass' } else { '❌ Fail' }))),
+                ("| Runbook validation | {0} |" -f ($(if ($rb -eq 0) { '✅ Pass' } else { '❌ Fail' }))),
+                "",
+                ("**Details:** {0}" -f $msg)
+              )
+              $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+
+            # Single top-level annotation
+            Write-Output "::error title=Runbook validation failed::$msg"
             Write-Error -Message $msg -ErrorAction Stop
+          }
+
+          if ($env:GITHUB_STEP_SUMMARY) {
+            @(
+              "## Runbook validation summary",
+              "",
+              "| Area | Result |",
+              "|------|--------|",
+              "| Permissions JSON | ✅ Pass |",
+              "| Runbook validation | ✅ Pass |"
+            ) -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
 
           Write-Output "All validations passed."
