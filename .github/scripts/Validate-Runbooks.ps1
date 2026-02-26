@@ -3,7 +3,7 @@
     Validates changed RealmJoin PowerShell runbooks in a pull request.
 
     .DESCRIPTION
-    This script detects PowerShell runbooks that were added or modified compared to a base ref and validates their comment-based help header and companion permissions JSON file. It also runs PSScriptAnalyzer and fails the check only on findings with severity Error.
+    This script detects PowerShell runbooks that were added or modified compared to a base ref and validates their comment-based help header and companion permissions JSON file. It also runs PSScriptAnalyzer and fails the check on findings with severity Error or ParseError.
 
     .PARAMETER BaseRef
     The git reference to diff against, for example "origin/master".
@@ -36,7 +36,8 @@ function Write-GitHubError {
         Write-Output "::error file=$FilePath,title=Runbook validation failed::$Message"
     }
     else {
-        Write-Error $Message
+        # GitHub Actions annotation (no file context)
+        Write-Output "::error title=Runbook validation failed::$Message"
     }
 }
 
@@ -244,7 +245,7 @@ function Assert-RunbookHelpIsComplete {
         return (($s ?? '') -replace '\s+', ' ').Trim().ToLowerInvariant()
     }
 
-    if (& $normalize $synopsis -eq (& $normalize $description)) {
+    if ((& $normalize $synopsis) -eq (& $normalize $description)) {
         $synShort = Shorten-Text -Text $synopsis
         $descShort = Shorten-Text -Text $description
         throw "Synopsis and Description must not be identical. Make .DESCRIPTION more detailed than .SYNOPSIS. Seen Synopsis='$synShort' Description='$descShort'"
@@ -310,51 +311,129 @@ function Assert-RunbookPassesScriptAnalyzer {
     }
 }
 
-$changed = Get-ChangedFiles -Base $BaseRef -Head $HeadRef
-$changedPs1 = $changed | Where-Object {
-    $_.ToLowerInvariant().EndsWith('.ps1') -and
-    -not $_.ToLowerInvariant().StartsWith('.github/')
+function Write-WrappedText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text,
+
+        [Parameter(Mandatory = $false)]
+        [int]$Width = 140,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Indent = "  "
+    )
+
+    $splitLines = $Text -split "`r`n|`n|`r"
+    foreach ($rawLine in $splitLines) {
+        $line = ($rawLine ?? '').TrimEnd()
+        if (-not $line) {
+            Write-Output ""
+            continue
+        }
+
+        $remaining = $line
+        while ($remaining.Length -gt $Width) {
+            $breakAt = $remaining.LastIndexOf(' ', $Width)
+            if ($breakAt -lt 20) {
+                $breakAt = $Width
+            }
+            Write-Output ($Indent + $remaining.Substring(0, $breakAt).TrimEnd())
+            $remaining = $remaining.Substring($breakAt).TrimStart()
+        }
+
+        if ($remaining) {
+            Write-Output ($Indent + $remaining)
+        }
+    }
 }
 
-if (-not $changedPs1 -or $changedPs1.Count -eq 0) {
-    Write-Output "No changed runbooks (*.ps1) detected. Skipping validation."
-    exit 0
-}
+try {
+    $changed = @(
+        Get-ChangedFiles -Base $BaseRef -Head $HeadRef
+    )
 
-$failures = 0
-$failureList = @()
+    $changedPs1 = @(
+        $changed | Where-Object {
+            $_.ToLowerInvariant().EndsWith('.ps1') -and
+            -not $_.ToLowerInvariant().StartsWith('.github/')
+        }
+    )
 
-foreach ($relPath in $changedPs1) {
-    $path = Join-Path (Get-Location).Path $relPath
-
-    if (-not (Test-Path -LiteralPath $path)) {
-        continue
+    if ($changedPs1.Count -eq 0) {
+        Write-Output "No changed runbooks (*.ps1) detected. Skipping validation."
+        exit 0
     }
 
-    Write-Output "::group::Validate runbook: $relPath"
+    $failures = 0
+    $failureList = @()
+    $successList = @()
 
-    try {
-        Assert-RunbookHasPermissionsFile -RunbookPath $path
-        Assert-RunbookPassesScriptAnalyzer -RunbookPath $path
-        Assert-RunbookHelpIsComplete -RunbookPath $path -RunbookRelativePath $relPath
+    foreach ($relPath in $changedPs1) {
+        $path = Join-Path (Get-Location).Path $relPath
+
+        if (-not (Test-Path -LiteralPath $path)) {
+            continue
+        }
+
+        Write-Output "::group::Validate runbook: $relPath"
+
+        try {
+            Assert-RunbookHasPermissionsFile -RunbookPath $path
+            Assert-RunbookPassesScriptAnalyzer -RunbookPath $path
+            Assert-RunbookHelpIsComplete -RunbookPath $path -RunbookRelativePath $relPath
+
+            $successList += $relPath
+        }
+        catch {
+            $failures++
+            $message = $($_.Exception.Message)
+            $failureList += [PSCustomObject]@{ Runbook = $relPath; Message = $message }
+            Write-Output "FAILED: $relPath - $message"
+            Write-GitHubError -Message $message -FilePath $relPath
+        }
+
+        Write-Output "::endgroup::"
     }
-    catch {
-        $failures++
-        $message = $($_.Exception.Message)
-        $failureList += [PSCustomObject]@{ Runbook = $relPath; Message = $message }
-        Write-Output "FAILED: $relPath - $message"
-        Write-GitHubError -Message $message -FilePath $relPath
-    }
 
-    Write-Output "::endgroup::"
-}
-
-if ($failures -gt 0) {
     Write-Output ""
     Write-Output "Validation summary"
     Write-Output "------------------"
-    $failureList | Select-Object Runbook, Message | Format-Table -AutoSize | Out-String | Write-Output
-    throw "Runbook validation failed for $failures file(s)."
-}
 
-Write-Output "Runbook validation passed for $($changedPs1.Count) file(s)."
+    if ($successList.Count -gt 0) {
+        Write-Output ""
+        Write-Output "Ohne fehler"
+        Write-Output "-----------"
+        foreach ($rb in ($successList | Sort-Object)) {
+            Write-Output $rb
+        }
+    }
+
+    if ($failureList.Count -gt 0) {
+        Write-Output ""
+        Write-Output "Runbooks mit Fehlern"
+        Write-Output "--------------------"
+
+        foreach ($f in $failureList) {
+            Write-Output ""
+            Write-Output $f.Runbook
+            Write-Output ("-" * [Math]::Min(120, [Math]::Max(3, $f.Runbook.Length)))
+            Write-WrappedText -Text $f.Message -Width 140 -Indent "  "
+        }
+    }
+
+    if ($failures -gt 0) {
+        Write-Output ""
+        Write-Output "Runbook validation failed for $failures file(s)."
+        exit 1
+    }
+
+    Write-Output ""
+    Write-Output "Runbook validation passed for $($changedPs1.Count) file(s)."
+    exit 0
+}
+catch {
+    $message = "Validator failed unexpectedly. Error: $($_.Exception.Message)"
+    Write-Output $message
+    Write-GitHubError -Message $message
+    exit 1
+}
