@@ -286,13 +286,22 @@ function Assert-RunbookPassesScriptAnalyzer {
     }
 
     try {
-        $results = Invoke-ScriptAnalyzer -Path $RunbookPath -Severity @('Error')
+        # Do not filter by -Severity here.
+        # PSScriptAnalyzer reports syntax issues as Severity 'ParseError', which would be missed
+        # when only requesting 'Error'. We filter below to block on both.
+        $results = Invoke-ScriptAnalyzer -Path $RunbookPath
     }
     catch {
         throw "PSScriptAnalyzer failed to analyze '$RunbookPath'. Error: $($_.Exception.Message)"
     }
-    if ($results -and $results.Count -gt 0) {
-        $messages = $results | ForEach-Object {
+
+    $blocking = @()
+    if ($results) {
+        $blocking = $results | Where-Object { $_.Severity -in @('Error', 'ParseError') }
+    }
+
+    if ($blocking -and $blocking.Count -gt 0) {
+        $messages = $blocking | ForEach-Object {
             $line = if ($_.Line) { "Line $($_.Line)" } else { "" }
             "[$($_.Severity)] $($_.RuleName) $($line): $($_.Message)"
         }
