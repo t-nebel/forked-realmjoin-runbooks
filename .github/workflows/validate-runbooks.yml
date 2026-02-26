@@ -58,8 +58,24 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $perm = [int]'${{ steps.permissions.outputs.exitCode }}'
-          $rb = [int]'${{ steps.runbooks.outputs.exitCode }}'
+          $permRaw = '${{ steps.permissions.outputs.exitCode }}'
+          $rbRaw = '${{ steps.runbooks.outputs.exitCode }}'
+
+          $perm = 1
+          $rb = 1
+          [void][int]::TryParse($permRaw, [ref]$perm)
+          [void][int]::TryParse($rbRaw, [ref]$rb)
+
+          if ($perm -ne 0) {
+            Write-Output "FAILED: Missing/invalid permissions JSON files (exit code: $perm)"
+          }
+
+          if ($rb -ne 0) {
+            Write-Output "FAILED: Runbook validation errors (exit code: $rb)"
+          }
+
           if ($perm -ne 0 -or $rb -ne 0) {
             exit 1
           }
+
+          Write-Output "All validations passed."
