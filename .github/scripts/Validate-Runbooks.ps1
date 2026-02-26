@@ -208,18 +208,25 @@ function Assert-RunbookHasPermissionsFile {
 function Assert-RunbookHelpIsComplete {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$RunbookPath
+        [string]$RunbookPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RunbookRelativePath
     )
 
     $content = Get-Content -LiteralPath $RunbookPath -Raw
     $null = Get-TopCommentBasedHelpBlock -Content $content -PathForErrors $RunbookPath
 
     $resolvedPath = (Resolve-Path -LiteralPath $RunbookPath -ErrorAction Stop).Path
+    $helpTarget = $RunbookRelativePath -replace '\\', '/'
+    if (-not ($helpTarget.StartsWith('./') -or $helpTarget.StartsWith('.\\'))) {
+        $helpTarget = "./$helpTarget"
+    }
     try {
-        $help = Get-Help -Full $resolvedPath -ErrorAction Stop
+        $help = Get-Help -Full $helpTarget -ErrorAction Stop
     }
     catch {
-        throw "Get-Help failed to read comment-based help for '$resolvedPath'. Error: $($_.Exception.Message)"
+        throw "Get-Help failed to read comment-based help for '$helpTarget' ('$resolvedPath'). Error: $($_.Exception.Message)"
     }
 
     $synopsis = (Convert-HelpTextToString -HelpText $help.Synopsis).Trim()
@@ -320,7 +327,7 @@ foreach ($relPath in $changedPs1) {
     try {
         Assert-RunbookHasPermissionsFile -RunbookPath $path
         Assert-RunbookPassesScriptAnalyzer -RunbookPath $path
-        Assert-RunbookHelpIsComplete -RunbookPath $path
+        Assert-RunbookHelpIsComplete -RunbookPath $path -RunbookRelativePath $relPath
     }
     catch {
         $failures++
