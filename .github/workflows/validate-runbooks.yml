@@ -37,7 +37,8 @@ jobs:
         shell: pwsh
         working-directory: repo
         run: |
-          pwsh -NoProfile -File ../validator/.github/scripts/Validate-PermissionsJson.ps1 -IncludedScope @("device", "group", "org", "user")
+          . ../validator/.github/scripts/Validate-PermissionsJson.ps1 `
+              -IncludedScope @("device", "group", "org", "user")
           "exitCode=$LASTEXITCODE" >> $env:GITHUB_OUTPUT
           exit 0
 
@@ -47,7 +48,9 @@ jobs:
         shell: pwsh
         working-directory: repo
         run: |
-          pwsh -NoProfile -File ../validator/.github/scripts/Validate-Runbooks.ps1 -BaseRef "${{ github.event.pull_request.base.sha }}" -HeadRef "${{ github.event.pull_request.head.sha }}"
+          . ../validator/.github/scripts/Validate-Runbooks.ps1 `
+              -BaseRef "${{ github.event.pull_request.base.sha }}" `
+              -HeadRef "${{ github.event.pull_request.head.sha }}"
           "exitCode=$LASTEXITCODE" >> $env:GITHUB_OUTPUT
           exit 0
 
